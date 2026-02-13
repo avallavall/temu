@@ -5,6 +5,7 @@ import { MessageBus } from './message-bus.js';
 import { Teammate, type TeammateCallbacks, type TeammateStatus } from './teammate.js';
 import { saveTeamConfig, deleteTeamConfig, type TeamConfig, type TeammateConfig } from './team-config.js';
 import { logger } from '../utils/logger.js';
+import chalk from 'chalk';
 
 export interface CreateTeamRequest {
   name: string;
@@ -34,6 +35,9 @@ export class TeamManager {
   private messageBus = new MessageBus();
   private teamName: string | null = null;
   private teamConfig: TeamConfig | null = null;
+  private displayMode: 'in-process' | 'split-pane' = 'in-process';
+  private recentMessages = new Map<string, string[]>();
+  private statuses = new Map<string, TeammateStatus>();
   private provider: LLMProvider;
   private toolRegistry: ToolRegistry;
   private cwd: string;
@@ -71,6 +75,17 @@ export class TeamManager {
     return this.teamName;
   }
 
+  getDisplayMode(): 'in-process' | 'split-pane' {
+    return this.displayMode;
+  }
+
+  setDisplayMode(mode: 'in-process' | 'split-pane'): void {
+    this.displayMode = mode;
+    if (this.teamConfig) {
+      this.teamConfig.displayMode = mode;
+    }
+  }
+
   async createTeam(request: CreateTeamRequest): Promise<void> {
     if (this.teamName) {
       throw new Error('A team is already active. Clean up first.');
@@ -78,6 +93,7 @@ export class TeamManager {
 
     this.teamName = request.name;
     this.taskList = new TaskList(request.name);
+    this.displayMode = request.displayMode ?? 'in-process';
 
     // Create tasks
     const taskIdMap = new Map<string, string>(); // title -> id
@@ -100,17 +116,26 @@ export class TeamManager {
       leadSessionId: 'current',
       members: request.members,
       createdAt: Date.now(),
-      displayMode: request.displayMode ?? 'in-process',
+      displayMode: this.displayMode,
     };
     await saveTeamConfig(this.teamConfig);
 
     // Create teammates
     for (const memberConfig of request.members) {
       const teammateCallbacks: TeammateCallbacks = {
-        onContent: (name, content) => this.callbacks.onTeammateContent?.(name, content),
+        onContent: (name, content) => {
+          if (!this.recentMessages.has(name)) this.recentMessages.set(name, []);
+          const arr = this.recentMessages.get(name)!;
+          arr.push(content.slice(0, 200));
+          if (arr.length > 5) arr.shift();
+          this.callbacks.onTeammateContent?.(name, content);
+        },
         onToolCall: (name, toolName, args) => this.callbacks.onTeammateToolCall?.(name, toolName, args),
         onToolResult: (name, toolName, result) => this.callbacks.onTeammateToolResult?.(name, toolName, result),
-        onStatusChange: (name, status) => this.callbacks.onTeammateStatusChange?.(name, status),
+        onStatusChange: (name, status) => {
+          this.statuses.set(name, status);
+          this.callbacks.onTeammateStatusChange?.(name, status);
+        },
         onTaskComplete: (name, taskId) => {
           this.callbacks.onTeammateTaskComplete?.(name, taskId);
           this.checkAllComplete();
@@ -240,11 +265,20 @@ export class TeamManager {
 
   getTeamSummary(): string {
     const lines: string[] = [];
-    lines.push(`=== Team: ${this.teamName} ===`);
+    lines.push(`=== Team: ${this.teamName} (${this.displayMode}) ===`);
 
     lines.push('\nTeammates:');
     for (const [, teammate] of this.teammates) {
-      lines.push(`  ${teammate.toSummary()}`);
+      const status = this.statuses.get(teammate.name) ?? teammate.getStatus();
+      lines.push(`  ${teammate.toSummary()} [${status}]`);
+
+      const msgs = this.recentMessages.get(teammate.name) ?? [];
+      if (msgs.length > 0) {
+        lines.push('    Recent:');
+        for (const m of msgs.slice(-3)) {
+          lines.push(`      • ${m}`);
+        }
+      }
     }
 
     if (this.taskList) {
@@ -252,6 +286,57 @@ export class TeamManager {
     }
 
     return lines.join('\n');
+  }
+
+  getSplitPaneView(): string {
+    const maxWidth = 90;
+    const truncate = (s: string, width: number) => (s.length > width ? s.slice(0, width - 1) + '…' : s);
+    const header = (name: string, role: string, status: TeammateStatus) => {
+      const label = `${name} (${role}) [${status}]`;
+      const colored = status === 'working'
+        ? chalk.green(label)
+        : status === 'waiting' || status === 'idle'
+          ? chalk.yellow(label)
+          : status === 'shutdown'
+            ? chalk.red(label)
+            : label;
+      const line = `┌─ ${colored} ${'─'.repeat(Math.max(0, maxWidth - label.length - 4))}`;
+      return truncate(line, maxWidth);
+    };
+    const footer = '└' + '─'.repeat(maxWidth - 1);
+
+    const teammateBlocks: string[] = [];
+    for (const [, teammate] of this.teammates) {
+      const status = this.statuses.get(teammate.name) ?? teammate.getStatus();
+      const msgs = this.recentMessages.get(teammate.name) ?? [];
+      const lines = msgs.slice(-3).map((m) => truncate(`  • ${m}`, maxWidth));
+      if (lines.length === 0) lines.push('  (no messages)');
+      teammateBlocks.push([header(teammate.name, teammate.role, status), ...lines, footer].join('\n'));
+    }
+
+    const tasksBlock = this.taskList ? this.taskList.toSummary() : 'No tasks';
+
+    return [
+      chalk.bold(`=== Team: ${this.teamName} (${this.displayMode}) ===`),
+      '',
+      teammateBlocks.join('\n'),
+      '',
+      chalk.bold('Tasks:'),
+      tasksBlock,
+    ].join('\n');
+  }
+
+  getTeammateSummaries(): { name: string; role: string; status: TeammateStatus; messages: string[] }[] {
+    const summaries: { name: string; role: string; status: TeammateStatus; messages: string[] }[] = [];
+    for (const [, teammate] of this.teammates) {
+      summaries.push({
+        name: teammate.name,
+        role: teammate.role,
+        status: this.statuses.get(teammate.name) ?? teammate.getStatus(),
+        messages: this.recentMessages.get(teammate.name) ?? [],
+      });
+    }
+    return summaries;
   }
 
   private checkAllComplete(): void {

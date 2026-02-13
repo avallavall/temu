@@ -13,8 +13,12 @@ export const writeTool = createToolDef(
     },
   },
   async (args, context) => {
-    const filePath = path.resolve(context.cwd, args.file_path as string);
-    const content = args.content as string;
+    const rawPath = (args.file_path as string ?? '').trim();
+    if (!rawPath || rawPath === 'unknown') {
+      return { success: false, output: '', error: 'file_path is required. Provide the full absolute path for the new file.' };
+    }
+    const content = (args.content as string) ?? '';
+    const filePath = path.isAbsolute(rawPath) ? rawPath : path.resolve(context.cwd, rawPath);
 
     try {
       // Check if file already exists

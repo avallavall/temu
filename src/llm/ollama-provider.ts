@@ -20,6 +20,15 @@ export class OllamaProvider implements LLMProvider {
     this.defaultTopP = config.topP ?? 0.9;
   }
 
+  setModel(model: string): void {
+    this.defaultModel = model;
+    logger.info(`Provider model changed to: ${model}`);
+  }
+
+  getModel(): string {
+    return this.defaultModel;
+  }
+
   async chat(
     messages: ChatCompletionMessageParam[],
     tools?: ChatCompletionTool[],

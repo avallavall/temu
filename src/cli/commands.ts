@@ -19,6 +19,9 @@ export interface CommandContext {
   cwd: string;
   print: (text: string) => void;
   setModel: (model: string) => void;
+  getDisplayMode?: () => 'in-process' | 'split-pane';
+  setDisplayMode?: (mode: 'in-process' | 'split-pane') => void;
+  _rl?: import('node:readline').Interface;
 }
 
 interface SlashCommand {
@@ -63,17 +66,77 @@ export const slashCommands: SlashCommand[] = [
     aliases: ['m'],
     description: 'View or change the current model. Usage: /model [name]',
     execute: async (args, ctx) => {
-      if (!args.trim()) {
-        ctx.print(`Current model: ${chalk.cyan(ctx.currentModel)}`);
-        const models = await ctx.provider.listModels();
-        if (models.length > 0) {
-          ctx.print(`Available: ${models.join(', ')}`);
-        }
-      } else {
-        ctx.setModel(args.trim());
-        ctx.print(`Model changed to: ${chalk.cyan(args.trim())}`);
+      const input = args.trim();
+      if (input) {
+        ctx.setModel(input);
+        ctx.print(`Model changed to: ${chalk.cyan(input)}`);
+        return false;
       }
-      return false;
+
+      const models = await ctx.provider.listModels();
+      if (models.length === 0) {
+        ctx.print('No models available. Pull one with `ollama pull qwen3:8b`.');
+        return false;
+      }
+
+      let idx = Math.max(0, models.indexOf(ctx.currentModel));
+      const render = () => {
+        const lines = [
+          `Use ↑/↓ and Enter. ESC to cancel.`,
+          `Current: ${chalk.cyan(ctx.currentModel)}`,
+          '',
+          ...models.map((m, i) => (i === idx ? `${chalk.green('>')} ${chalk.bold(m)}` : `  ${m}`)),
+        ];
+        ctx.print(lines.join('\n'));
+      };
+
+      const rl = (ctx as any)._rl as import('node:readline').Interface | undefined;
+      const stdin = process.stdin;
+      const wasRaw = stdin.isRaw;
+      if (!wasRaw) stdin.setRawMode?.(true);
+      stdin.resume();
+      stdin.setEncoding('utf8');
+
+      return await new Promise<boolean>((resolve) => {
+        const onData = (chunk: string) => {
+          if (chunk === '\u0003') {
+            cleanup();
+            return resolve(false);
+          }
+          if (chunk === '\u001b[A') { // up
+            idx = (idx - 1 + models.length) % models.length;
+            rerender();
+          } else if (chunk === '\u001b[B') { // down
+            idx = (idx + 1) % models.length;
+            rerender();
+          } else if (chunk === '\r') { // enter
+            const chosen = models[idx];
+            ctx.setModel(chosen);
+            ctx.print(`Model changed to: ${chalk.cyan(chosen)}`);
+            cleanup();
+            resolve(false);
+          } else if (chunk === '\u001b') { // esc
+            cleanup();
+            resolve(false);
+          }
+        };
+
+        const cleanup = () => {
+          stdin.off('data', onData);
+          if (!wasRaw) stdin.setRawMode?.(false);
+          stdin.pause();
+          if (rl) rl.prompt(true);
+        };
+
+        const rerender = () => {
+          // Clear last render block (simple approach: write ANSI clear screen)
+          process.stdout.write('\x1b[2J\x1b[0f');
+          render();
+        };
+
+        render();
+        stdin.on('data', onData);
+      });
     },
   },
   {
@@ -125,6 +188,41 @@ export const slashCommands: SlashCommand[] = [
         return false;
       }
       ctx.print(ctx.teamManager.getTeamSummary());
+      return false;
+    },
+  },
+  {
+    name: 'teamview',
+    aliases: ['tv'],
+    description: 'Show split-pane style view of team (teammates + tasks)',
+    execute: async (_args, ctx) => {
+      if (!ctx.teamManager.isActive()) {
+        ctx.print(chalk.dim('No active team. Ask me to create one!'));
+        return false;
+      }
+      ctx.print(ctx.teamManager.getSplitPaneView());
+      return false;
+    },
+  },
+  {
+    name: 'displaymode',
+    aliases: ['dm'],
+    description: 'Set display mode: in-process or split-pane. Usage: /displaymode split-pane',
+    execute: async (args, ctx) => {
+      const mode = args.trim() as 'in-process' | 'split-pane';
+      if (!mode) {
+        ctx.print(`Current mode: ${ctx.getDisplayMode ? ctx.getDisplayMode() : 'in-process'}`);
+        ctx.print('Usage: /displaymode in-process | split-pane');
+        return false;
+      }
+      if (mode !== 'in-process' && mode !== 'split-pane') {
+        ctx.print('Invalid mode. Use: in-process or split-pane');
+        return false;
+      }
+      if (ctx.setDisplayMode) {
+        ctx.setDisplayMode(mode);
+      }
+      ctx.print(`Display mode set to: ${mode}`);
       return false;
     },
   },

@@ -45,6 +45,10 @@ export async function loadSettings(cwd: string): Promise<TemuSettings> {
   const userSettings = await loadJsonSafe<TemuSettings>(TEMU_DIRS.userSettings);
   const projSettings = await loadJsonSafe<TemuSettings>(projectSettings(cwd));
 
+  // Allow alternate project config name: .temu/config.json (higher precedence than settings.json)
+  const altProjectConfigPath = path.join(cwd, '.temu', 'config.json');
+  const projAltSettings = await loadJsonSafe<TemuSettings>(altProjectConfigPath);
+
   // Local settings (not committed to git)
   const localPath = path.join(cwd, '.temu', 'settings.local.json');
   const localSettings = await loadJsonSafe<TemuSettings>(localPath);
@@ -54,20 +58,23 @@ export async function loadSettings(cwd: string): Promise<TemuSettings> {
     ...DEFAULT_SETTINGS,
     ...userSettings,
     ...projSettings,
+    ...projAltSettings,
     ...localSettings,
   };
 
   // Merge permissions separately (additive)
-  if (userSettings?.permissions || projSettings?.permissions || localSettings?.permissions) {
+  if (userSettings?.permissions || projSettings?.permissions || projAltSettings?.permissions || localSettings?.permissions) {
     merged.permissions = {
       allow: [
         ...(userSettings?.permissions?.allow ?? []),
         ...(projSettings?.permissions?.allow ?? []),
+        ...(projAltSettings?.permissions?.allow ?? []),
         ...(localSettings?.permissions?.allow ?? []),
       ],
       deny: [
         ...(userSettings?.permissions?.deny ?? []),
         ...(projSettings?.permissions?.deny ?? []),
+        ...(projAltSettings?.permissions?.deny ?? []),
         ...(localSettings?.permissions?.deny ?? []),
       ],
     };

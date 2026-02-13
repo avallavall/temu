@@ -12,6 +12,7 @@ export interface ToolExecutionResult {
 
 export class ToolExecutor {
   private hookManager?: HookManager;
+  onAllowAlways?: (toolName: string, args: Record<string, unknown>) => Promise<void>;
 
   constructor(
     private registry: ToolRegistry,
@@ -51,9 +52,16 @@ export class ToolExecutor {
 
     if ('needsApproval' in permResult && permResult.needsApproval) {
       const answer = await this.context.askUser(
-        `Allow ${toolCall.name}? ${permResult.description} (y/n)`,
+        `Allow ${toolCall.name}? ${permResult.description} (y/n/a=always)`,
       );
-      if (answer.toLowerCase() !== 'y' && answer.toLowerCase() !== 'yes') {
+      const lower = answer.toLowerCase().trim();
+      if (lower === 'a' || lower === 'always') {
+        // Save as permanent allow rule
+        this.context.permissions.allowForSession(toolCall.name);
+        if (this.onAllowAlways) {
+          await this.onAllowAlways(toolCall.name, toolCall.arguments);
+        }
+      } else if (lower !== 'y' && lower !== 'yes') {
         return {
           toolCallId: toolCall.id,
           toolName: toolCall.name,

@@ -70,6 +70,8 @@ temu "hello world"
 | `/cost` | Show token usage |
 | `/tasks` | Show team task list |
 | `/team` | Show team status |
+| `/teamview` | Split-pane style view of teammates and tasks |
+| `/displaymode [mode]` | Set display mode: in-process or split-pane |
 | `/sessions` | List previous sessions |
 | `/agent [name] [prompt]` | Run a subagent |
 | `/skills` | List loaded skills |

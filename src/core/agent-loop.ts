@@ -21,6 +21,7 @@ export interface AgentLoopConfig {
   onToolResult?: (name: string, result: { success: boolean; output: string }) => void;
   onTurnComplete?: (turn: number) => void;
   onCompaction?: () => void;
+  onAllowAlways?: (toolName: string, args: Record<string, unknown>) => Promise<void>;
 }
 
 export interface AgentLoopResult {
@@ -41,6 +42,9 @@ export class AgentLoop {
     this.config = config;
     this.contextManager = new ContextManager(config.model);
     this.toolExecutor = new ToolExecutor(config.toolRegistry, config.toolContext);
+    if (config.onAllowAlways) {
+      this.toolExecutor.onAllowAlways = config.onAllowAlways;
+    }
 
     // Add system prompt
     const systemMsg = buildSystemPrompt({

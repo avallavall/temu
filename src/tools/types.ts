@@ -23,6 +23,7 @@ export interface ToolContext {
 
 export interface PermissionChecker {
   check(toolName: string, args?: Record<string, unknown>): Promise<PermissionResult>;
+  allowForSession(toolKey: string): void;
 }
 
 export type PermissionResult =

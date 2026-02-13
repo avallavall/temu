@@ -1,7 +1,12 @@
 #!/usr/bin/env node
 
+// Suppress noisy node deprecation warnings (e.g., punycode) for cleaner UX
+process.env.NODE_NO_WARNINGS = process.env.NODE_NO_WARNINGS ?? '1';
+
 import { Command } from 'commander';
 import readline from 'node:readline';
+import fs from 'node:fs/promises';
+import path from 'node:path';
 import chalk from 'chalk';
 import ora from 'ora';
 
@@ -16,7 +21,7 @@ import { loadMemoryChain } from './config/memory.js';
 import { ensureTemuDirs } from './config/paths.js';
 import { renderMarkdown } from './utils/markdown.js';
 import { setLogLevel } from './utils/logger.js';
-import { findCommand, type CommandContext } from './cli/commands.js';
+import { findCommand, slashCommands, type CommandContext } from './cli/commands.js';
 import { HookManager } from './hooks/hook-manager.js';
 import { SubagentManager } from './subagents/subagent-manager.js';
 import { loadAllSkills } from './skills/skill-loader.js';
@@ -32,6 +37,7 @@ import { globTool } from './tools/glob.js';
 import { listDirTool } from './tools/list-dir.js';
 import { askUserTool } from './tools/ask-user.js';
 import { createTaskTool } from './tools/task.js';
+import { createTeamTool } from './tools/create-team.js';
 
 const VERSION = '0.1.0';
 
@@ -70,6 +76,7 @@ async function run(query: string | undefined, opts: Record<string, unknown>) {
   const ollamaUrl = (opts.ollamaUrl as string) ?? settings.ollamaBaseUrl ?? 'http://localhost:11434/v1';
   const permMode = (opts.permissionMode as string) ?? settings.defaultMode ?? 'default';
   const maxTurns = (opts.maxTurns as number) ?? settings.maxTurns ?? 100;
+  const isVerbose = !!opts.verbose;
 
   // Create LLM provider
   const provider = new OllamaProvider({
@@ -121,10 +128,32 @@ async function run(query: string | undefined, opts: Record<string, unknown>) {
     hookManager.registerAll(settings.hooks);
   }
 
-  // Create readline interface for user input
+  // Load skills early so we can use them in the completer
+  const skills = await loadAllSkills(cwd);
+
+  // Build slash command completions for tab-autocomplete
+  const slashCompletions: string[] = [];
+  for (const cmd of slashCommands) {
+    slashCompletions.push('/' + cmd.name);
+    for (const alias of cmd.aliases) {
+      slashCompletions.push('/' + alias);
+    }
+  }
+  for (const skill of skills) {
+    slashCompletions.push('/' + skill.name);
+  }
+
+  // Create readline interface with tab completion
   const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout,
+    completer: (line: string) => {
+      if (line.startsWith('/')) {
+        const hits = slashCompletions.filter((c) => c.startsWith(line));
+        return [hits.length ? hits : slashCompletions, line];
+      }
+      return [[], line];
+    },
   });
 
   const askUser = (question: string): Promise<string> => {
@@ -139,6 +168,11 @@ async function run(query: string | undefined, opts: Record<string, unknown>) {
   const taskTool = createTaskTool({ provider, toolRegistry, cwd, askUser });
   toolRegistry.register(taskTool);
 
+  // CreateTeam tool - uses lazy getter since teamManager is created later
+  let teamManagerRef: TeamManager | null = null;
+  const teamTool = createTeamTool({ getTeamManager: () => teamManagerRef! });
+  toolRegistry.register(teamTool);
+
   // Load project memory
   const projectMemory = await loadMemoryChain(cwd);
 
@@ -149,8 +183,7 @@ async function run(query: string | undefined, opts: Record<string, unknown>) {
   // Subagent manager
   const subagentManager = new SubagentManager({ provider, toolRegistry, cwd, askUser });
 
-  // Load skills
-  const skills = await loadAllSkills(cwd);
+  // Skills already loaded above for completer
 
   // Fire SessionStart hook
   await hookManager.fire({ event: 'SessionStart', sessionId: session.id, timestamp: Date.now() });
@@ -174,10 +207,12 @@ async function run(query: string | undefined, opts: Record<string, unknown>) {
       process.stdout.write('\n');
     },
     onToolCall: (name, args) => {
+      if (!isVerbose) return;
       const argsStr = JSON.stringify(args).slice(0, 80);
       console.error(chalk.dim(`  ▸ ${name}(${argsStr})`));
     },
     onToolResult: (name, result) => {
+      if (!isVerbose && result.success) return;
       const icon = result.success ? chalk.green('✓') : chalk.red('✗');
       const preview = result.output.slice(0, 60).replace(/\n/g, ' ');
       console.error(chalk.dim(`  ${icon} ${name}: ${preview}`));
@@ -185,12 +220,31 @@ async function run(query: string | undefined, opts: Record<string, unknown>) {
     onCompaction: () => {
       console.error(chalk.dim('  ↻ Compacting context...'));
     },
+    onAllowAlways: async (toolName) => {
+      // Persist the allow rule to project settings
+      const projSettingsPath = path.join(cwd, '.temu', 'settings.json');
+      let existing: Record<string, unknown> = {};
+      try {
+        const raw = await fs.readFile(projSettingsPath, 'utf-8');
+        existing = JSON.parse(raw);
+      } catch { /* no existing settings */ }
+      const perms = (existing.permissions ?? {}) as Record<string, unknown>;
+      const allow = (perms.allow ?? []) as string[];
+      if (!allow.includes(toolName)) {
+        allow.push(toolName);
+      }
+      perms.allow = allow;
+      existing.permissions = perms;
+      await fs.mkdir(path.join(cwd, '.temu'), { recursive: true });
+      await fs.writeFile(projSettingsPath, JSON.stringify(existing, null, 2), 'utf-8');
+      console.error(chalk.green(`  ✓ Added "${toolName}" to always-allow rules (.temu/settings.json)`));
+    },
   });
 
   let agentLoop = createAgentLoop();
 
   // Create team manager
-  const teamManager = new TeamManager({
+  const teamManager: TeamManager = new TeamManager({
     provider,
     toolRegistry,
     cwd,
@@ -210,6 +264,7 @@ async function run(query: string | undefined, opts: Record<string, unknown>) {
       askUser,
     },
   });
+  teamManagerRef = teamManager;
 
   // Command context
   const cmdCtx: CommandContext = {
@@ -222,11 +277,17 @@ async function run(query: string | undefined, opts: Record<string, unknown>) {
     currentModel,
     cwd,
     print: (text) => console.log(text),
+    _rl: rl,
     setModel: (m) => {
       currentModel = m;
       cmdCtx.currentModel = m;
+      provider.setModel(m);
       agentLoop = createAgentLoop();
       cmdCtx.agentLoop = agentLoop;
+    },
+    getDisplayMode: () => teamManager.getDisplayMode(),
+    setDisplayMode: (mode) => {
+      teamManager.setDisplayMode(mode);
     },
   };
 
